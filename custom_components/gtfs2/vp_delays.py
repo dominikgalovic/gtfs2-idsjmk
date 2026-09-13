@@ -8,6 +8,7 @@ from __future__ import annotations
 import datetime
 import math
 import re
+import threading
 from collections import namedtuple
 
 from sqlalchemy.sql import text
@@ -18,12 +19,38 @@ MAX_POSITION_AGE = 120
 # A vehicle within this many metres of a stop counts as standing at it.
 STOP_RADIUS = 100
 
+# Before its first departure, a vehicle this close to its first stop is laying over there;
+# further away it has already set off.
+LAYOVER_RADIUS = 300
+
+# A trip cannot set off more than this many seconds before its first departure; a vehicle moving or
+# placed on the route earlier is still finishing its previous run or repositioning at the terminus.
+EARLY_DEPARTURE = 120
+
 # A vehicle whose reported stop is not on its trip is placed on the nearest
 # stretch between two of the trip's stops, when within this many metres of it.
 MAX_ROUTE_DISTANCE = 300
 
 # A match whose schedule is further than this many seconds from the vehicle is ignored.
 MAX_SCHEDULE_DEVIATION = 3600
+
+# A trip whose vehicle drops out (old position, feed error) keeps its last estimate this many seconds.
+HOLD_LAST_ESTIMATE = 300
+
+# A trip seen underway stays started for this many seconds after it was last seen underway.
+REMEMBER_STARTED = 3 * 3600
+
+# A vehicle that moves further than this many metres, away from its first stop, has set off.
+MOVED_DISTANCE = 50
+
+# Positions older than this many seconds are not compared to tell whether a vehicle moved.
+MOVEMENT_WINDOW = 900
+
+# Shared by all sensors, which Home Assistant refreshes in executor threads.
+_memory_lock = threading.Lock()
+_last_matches = {}
+_started_trips = {}
+_last_positions = {}
 
 StopTime = namedtuple("StopTime", "stop_id sequence arrival departure lat lon name", defaults=(None,))
 
@@ -157,26 +184,33 @@ def stop_index(stops, stop_id, stop_sequence=None):
     return None
 
 
-def locate(stops, k, lat, lon, t):
+def locate(stops, k, lat, lon, t, departed=False):
     """Where a vehicle heading to stop k is, and its delay at service-day second t.
 
     Feeds report the stop a vehicle heads to, even while it still stands at stop k-1.
+    departed: the vehicle was seen moving away from its first stop, so it no longer waits there.
     """
     heading = stops[k]
     previous = stops[k - 1] if k > 0 else None
     d_heading = _distance_to_stop(lat, lon, heading)
     d_previous = _distance_to_stop(lat, lon, previous) if previous else None
 
+    first_departure = departure_of(stops[0])
+    too_early = first_departure is not None and t < first_departure - EARLY_DEPARTURE
+    departed = departed and not too_early
+
     at_index = None
-    if d_previous is not None and d_previous <= STOP_RADIUS:
+    if d_previous is not None and d_previous <= STOP_RADIUS and not (departed and k == 1):
         at_index = k - 1
-    elif d_heading is not None and d_heading <= STOP_RADIUS:
+    elif d_heading is not None and d_heading <= STOP_RADIUS and not (departed and k == 0):
         at_index = k
 
-    # Before its first departure a vehicle lays over near the terminus,
-    # often further than STOP_RADIUS from the stop.
-    first_departure = departure_of(stops[0])
-    if at_index is None and k <= 1 and first_departure is not None and t < first_departure:
+    # Before its first departure a vehicle lays over near the terminus, often further than
+    # STOP_RADIUS from the stop; with no earlier position to show it moving, distance decides.
+    d_first = d_previous if k == 1 else d_heading if k == 0 else None
+    if not departed and first_departure is not None and t < first_departure and (
+        too_early or (at_index is None and d_first is not None and d_first <= LAYOVER_RADIUS)
+    ):
         at_index = 0
 
     if at_index is not None:
@@ -204,7 +238,7 @@ def locate(stops, k, lat, lon, t):
         delay = round(t - expected)
         score = abs(delay)
 
-    return {"at_index": at_index, "delay": delay, "score": score}
+    return {"at_index": at_index, "delay": delay, "score": score, "departed": departed}
 
 
 def _service_day_starts(stops, references, time_zone):
@@ -223,15 +257,38 @@ def _service_day_starts(stops, references, time_zone):
     return list(starts.values())
 
 
-def _match_vehicle(vehicle, stops, day_starts, now_utc):
+def _position(vehicle, now_utc):
+    """(lat, lon, timestamp) of a vehicle, or None when missing or older than MAX_POSITION_AGE."""
     timestamp = vehicle.get("timestamp") or now_utc.timestamp()
     if now_utc.timestamp() - timestamp > MAX_POSITION_AGE:
         return None
-
     position = vehicle.get("position") or {}
     lat, lon = position.get("latitude"), position.get("longitude")
     if lat is None or lon is None or (lat == 0 and lon == 0):
         return None
+    return lat, lon, timestamp
+
+
+def _label(vehicle):
+    return str((vehicle.get("vehicle") or {}).get("label") or "")
+
+
+def _moved_away(previous, current, first_stop, second_stop):
+    """Whether a vehicle set off between two positions: further from its first stop and closer to its second."""
+    if previous is None or first_stop.lat is None or first_stop.lon is None:
+        return False
+    (prev_lat, prev_lon, prev_time), (lat, lon, time_now) = previous, current
+    if time_now <= prev_time or distance_m(prev_lat, prev_lon, lat, lon) <= MOVED_DISTANCE:
+        return False
+    if distance_m(lat, lon, first_stop.lat, first_stop.lon) <= distance_m(prev_lat, prev_lon, first_stop.lat, first_stop.lon):
+        return False
+    if second_stop is None or second_stop.lat is None or second_stop.lon is None:
+        return True
+    return distance_m(lat, lon, second_stop.lat, second_stop.lon) < distance_m(prev_lat, prev_lon, second_stop.lat, second_stop.lon)
+
+
+def _match_vehicle(vehicle, position, stops, day_starts, departed):
+    lat, lon, timestamp = position
 
     k = stop_index(stops, vehicle.get("stop_id")) if vehicle.get("stop_id") else None
     # The reported stop is sometimes not on the trip even though the vehicle is (e.g. a diversion).
@@ -242,7 +299,7 @@ def _match_vehicle(vehicle, stops, day_starts, now_utc):
 
     best = None
     for day_start in day_starts:
-        located = locate(stops, k, lat, lon, timestamp - day_start.timestamp())
+        located = locate(stops, k, lat, lon, timestamp - day_start.timestamp(), departed)
         if located is None or located["score"] > MAX_SCHEDULE_DEVIATION:
             continue
         if best is None or located["score"] < best["score"]:
@@ -250,16 +307,17 @@ def _match_vehicle(vehicle, stops, day_starts, now_utc):
                 **located,
                 "k": k,
                 "day_start": day_start,
-                "label": str((vehicle.get("vehicle") or {}).get("label") or ""),
+                "label": _label(vehicle),
             }
     return best
 
 
-def _trip_update(trip_id, trip, match, now_utc):
+def _trip_update(trip_id, trip, match, now_utc, started):
     stops = trip["stops"]
     at_index = match["at_index"]
     first = at_index if at_index is not None else match["k"]
-    delay = max(0, int(match["delay"]))
+    # Whole minutes, so a time shown as HH:MM and the delay always agree.
+    delay = max(0, math.floor(match["delay"] / 60 + 0.5) * 60)
     day_start = match["day_start"].timestamp()
     now = int(now_utc.timestamp())
 
@@ -293,14 +351,29 @@ def _trip_update(trip_id, trip, match, now_utc):
             "label": match["label"],
             "current_stop": current.name or current.stop_id,
             "at_stop": at_index is not None,
+            "started": started,
         },
     }
 
 
-def derive_trip_updates(vehicle_entities, wanted, trip_loader, now_utc, time_zone):
-    """TripUpdate entities for the wanted trips that have a vehicle in the feed.
+def _is_started(match):
+    return not (match["at_index"] == 0 or (match["at_index"] is None and match["k"] == 0))
 
-    vehicle_entities: convert_gtfs_realtime_positions_to_json's entities.
+
+def _forget_old(now):
+    with _memory_lock:
+        for trip_id in [t for t, (_, seen) in _last_matches.items() if now - seen > HOLD_LAST_ESTIMATE]:
+            del _last_matches[trip_id]
+        for trip_id in [t for t, seen in _started_trips.items() if now - seen > REMEMBER_STARTED]:
+            del _started_trips[trip_id]
+        for key in [key for key, (_, _, seen) in _last_positions.items() if now - seen > MOVEMENT_WINDOW]:
+            del _last_positions[key]
+
+
+def derive_trip_updates(vehicle_entities, wanted, trip_loader, now_utc, time_zone):
+    """TripUpdate entities for the wanted trips that have a vehicle in the feed, or had one moments ago.
+
+    vehicle_entities: convert_gtfs_realtime_positions_to_json's entities (None when the feed failed).
     wanted: {trip_id: [(stop_id, stop_sequence or None, scheduled departure as aware datetime), ...]},
             the departures a sensor shows, used to tell which service day a trip runs on.
     trip_loader: trip_id -> {"route_id", "direction_id", "stops": [StopTime, ...]} or None.
@@ -312,14 +385,56 @@ def derive_trip_updates(vehicle_entities, wanted, trip_loader, now_utc, time_zon
         if trip_id in wanted:
             vehicles_by_trip.setdefault(trip_id, []).append(vehicle)
 
+    now = now_utc.timestamp()
+    _forget_old(now)
+
     updates = []
-    for trip_id, vehicles in vehicles_by_trip.items():
+    for trip_id in wanted:
+        vehicles = vehicles_by_trip.get(trip_id)
+        with _memory_lock:
+            remembered = _last_matches.get(trip_id)
+        if not vehicles and not remembered:
+            continue
         trip = trip_loader(trip_id)
         if not trip or not trip["stops"]:
             continue
-        day_starts = _service_day_starts(trip["stops"], wanted[trip_id], time_zone)
-        # A vehicle can be reported twice under different labels; keep the one fitting the schedule best.
-        matches = [m for m in (_match_vehicle(v, trip["stops"], day_starts, now_utc) for v in vehicles) if m]
-        if matches:
-            updates.append(_trip_update(trip_id, trip, min(matches, key=lambda m: m["score"]), now_utc))
+
+        match = None
+        if vehicles:
+            day_starts = _service_day_starts(trip["stops"], wanted[trip_id], time_zone)
+            matches = []
+            for vehicle in vehicles:
+                position = _position(vehicle, now_utc)
+                if position is None:
+                    continue
+                # Per label: two units in one vehicle report positions metres apart.
+                key = (trip_id, _label(vehicle))
+                with _memory_lock:
+                    departed = trip_id in _started_trips or _moved_away(
+                        _last_positions.get(key),
+                        position,
+                        trip["stops"][0],
+                        trip["stops"][1] if len(trip["stops"]) > 1 else None,
+                    )
+                    _last_positions[key] = position
+                found = _match_vehicle(vehicle, position, trip["stops"], day_starts, departed)
+                if found:
+                    matches.append(found)
+            # A vehicle can be reported twice under different labels; keep the one fitting the schedule best.
+            if matches:
+                match = min(matches, key=lambda m: m["score"])
+
+        with _memory_lock:
+            if match:
+                _last_matches[trip_id] = (match, now)
+            elif remembered:
+                match = remembered[0]
+            else:
+                continue
+            # Back near the first stop after being underway is GPS noise, not a new start.
+            started = _is_started(match) or match.get("departed", False) or trip_id in _started_trips
+            if started:
+                _started_trips[trip_id] = now
+
+        updates.append(_trip_update(trip_id, trip, match, now_utc, started))
     return updates

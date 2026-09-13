@@ -6,6 +6,7 @@ import zoneinfo
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 from freezegun import freeze_time
 
 import ha_stub
@@ -40,6 +41,14 @@ TRIP = {
 }
 WANTED = {"T1": [("U3Z1", None, at(17, 6))]}
 LOADER = {"T1": TRIP}.get
+
+
+@pytest.fixture(autouse=True)
+def fresh_memory():
+    vp._last_matches.clear()
+    vp._started_trips.clear()
+    vp._last_positions.clear()
+    yield
 
 
 def vehicle(lon, stop_id, when, label="3664", trip_id="T1", lat=49.0):
@@ -91,7 +100,19 @@ def test_delay_from_position_between_stops():
     assert stop["arrival"] == {"time": int(at(17, 4).timestamp()), "delay": 60}
     trip = updates[0]["trip_update"]["trip"]
     assert trip == {"trip_id": "T1", "route_id": "R31", "direction_id": "0"}
-    assert updates[0]["vehicle_position"] == {"label": "3664", "current_stop": "U1Z1", "at_stop": False}
+    assert updates[0]["vehicle_position"] == {
+        "label": "3664", "current_stop": "U1Z1", "at_stop": False, "started": True,
+    }
+
+
+def test_delay_is_whole_minutes_and_moves_the_time_by_the_same():
+    # halfway between the stops the vehicle is expected at 17:01:30
+    late = derive([vehicle(16.005, "U2Z1", at(17, 6, 20))], at(17, 6, 20))
+    assert first_update(late)["arrival"] == {"time": int(at(17, 8).timestamp()), "delay": 300}
+    slightly_late = derive([vehicle(16.005, "U2Z1", at(17, 2, 20))], at(17, 2, 20))
+    assert first_update(slightly_late)["arrival"] == {"time": int(at(17, 4).timestamp()), "delay": 60}
+    nearly_on_time = derive([vehicle(16.005, "U2Z1", at(17, 1, 50))], at(17, 1, 50))
+    assert first_update(nearly_on_time)["arrival"] == {"time": int(at(17, 3).timestamp()), "delay": 0}
 
 
 def test_padded_stop_id_in_feed():
@@ -105,7 +126,60 @@ def test_waiting_at_terminus_before_departure_is_on_time():
     stop = first_update(updates)
     assert stop["stop_id"] == "U1Z1"
     assert stop["departure"] == {"time": int(at(17, 0).timestamp()), "delay": 0}
-    assert updates[0]["vehicle_position"] == {"label": "3664", "current_stop": "U1Z1", "at_stop": True}
+    assert updates[0]["vehicle_position"] == {
+        "label": "3664", "current_stop": "U1Z1", "at_stop": True, "started": False,
+    }
+
+
+def test_vehicle_leaving_a_little_early_has_started_from_its_first_stop():
+    # 500 m past the first stop, 30 s before its scheduled departure
+    updates = derive([vehicle(16.0068, "U2Z1", at(16, 59, 30))], at(16, 59, 30))
+    assert first_update(updates)["stop_id"] == "U2Z1"
+    assert first_update(updates)["arrival"]["delay"] == 0
+    assert updates[0]["vehicle_position"] == {
+        "label": "3664", "current_stop": "U1Z1", "at_stop": False, "started": True,
+    }
+
+
+def test_parked_bus_that_moves_away_from_its_first_stop_has_started():
+    # parked 130 m from the first stop, then 205 m from it, towards the second stop, a minute later
+    parked = derive([vehicle(16.0018, "U2Z1", at(16, 58))], at(16, 58))
+    assert parked[0]["vehicle_position"] == {
+        "label": "3664", "current_stop": "U1Z1", "at_stop": True, "started": False,
+    }
+    leaving = derive([vehicle(16.0028, "U2Z1", at(16, 59))], at(16, 59))
+    assert leaving[0]["vehicle_position"] == {
+        "label": "3664", "current_stop": "U1Z1", "at_stop": False, "started": True,
+    }
+    assert first_update(leaving)["stop_id"] == "U2Z1"
+
+
+def test_bus_moving_to_its_layover_spot_long_before_departure_has_not_started():
+    # unloads at the first stop, then parks 130 m further on, twenty minutes before its next trip
+    derive([vehicle(16.0005, "U2Z1", at(16, 40))], at(16, 40))
+    parking = derive([vehicle(16.0018, "U2Z1", at(16, 41))], at(16, 41))
+    assert parking[0]["vehicle_position"]["started"] is False
+    assert parking[0]["vehicle_position"]["current_stop"] == "U1Z1"
+
+
+def test_vehicle_still_on_its_previous_run_has_not_started():
+    # already assigned this trip, but driving the route's streets 1.8 km away, fifteen minutes early
+    updates = derive([vehicle(16.025, "U99Z1", at(16, 45))], at(16, 45))
+    assert updates[0]["vehicle_position"]["started"] is False
+    assert first_update(updates)["stop_id"] == "U1Z1"
+    assert first_update(updates)["departure"] == {"time": int(at(17, 0).timestamp()), "delay": 0}
+
+
+def test_bus_pulling_up_to_its_first_stop_has_not_started():
+    derive([vehicle(16.0040, "U2Z1", at(16, 55))], at(16, 55))
+    at_the_stop = derive([vehicle(16.0010, "U2Z1", at(16, 56))], at(16, 56))
+    assert at_the_stop[0]["vehicle_position"]["started"] is False
+
+
+def test_gps_jitter_while_parked_is_not_a_departure():
+    derive([vehicle(16.0018, "U2Z1", at(16, 55))], at(16, 55))
+    jitter = derive([vehicle(16.0022, "U2Z1", at(16, 56))], at(16, 56))
+    assert jitter[0]["vehicle_position"]["started"] is False
 
 
 def test_standing_late_at_stop_departs_now():
@@ -154,6 +228,28 @@ def test_trip_past_midnight_uses_previous_service_day():
     assert first_update(updates)["arrival"] == {"time": int(at(0, 16, day=14).timestamp()), "delay": 0}
 
 
+def test_vehicle_dropping_out_keeps_its_last_estimate_for_a_while():
+    derive([vehicle(16.005, "U2Z1", at(17, 2, 30))], at(17, 2, 30))
+
+    stale = derive([vehicle(16.005, "U2Z1", at(17, 2, 30))], at(17, 6))
+    assert first_update(stale)["arrival"]["delay"] == 60
+    assert stale[0]["vehicle_position"]["current_stop"] == "U1Z1"
+
+    feed_failed = derive(None, at(17, 7))
+    assert first_update(feed_failed)["arrival"]["delay"] == 60
+
+    assert derive(None, at(17, 7, 31)) == []
+
+
+def test_started_trip_does_not_go_back_to_not_started():
+    underway = derive([vehicle(16.005, "U2Z1", at(17, 1))], at(17, 1))
+    assert underway[0]["vehicle_position"]["started"] is True
+
+    # GPS puts it back within reach of the first stop
+    jitter = derive([vehicle(16.0005, "U2Z1", at(17, 1, 20))], at(17, 1, 20))
+    assert jitter[0]["vehicle_position"]["started"] is True
+
+
 def _route_sensor(stop_id="U3Z1"):
     return SimpleNamespace(
         _vehicle_position_url=None,
@@ -187,7 +283,7 @@ def test_route_sensor_reads_the_estimate():
     at_stop = result["R31"]["0"]["U3Z1"]
     assert at_stop["departures"][0].timestamp() == at(17, 7).timestamp()
     assert at_stop["delays"] == [60]
-    assert at_stop["vehicles"] == [{"label": "3664", "current_stop": "U1Z1", "at_stop": False}]
+    assert at_stop["vehicles"] == [{"label": "3664", "current_stop": "U1Z1", "at_stop": False, "started": True}]
 
 
 def test_route_sensor_falls_back_to_vehicle_positions():

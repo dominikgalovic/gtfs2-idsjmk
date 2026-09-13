@@ -8,8 +8,11 @@ Fork of [vingerha/gtfs2](https://github.com/vingerha/gtfs2) for the South Moravi
   - stop ids padded with zeros in the feed are matched (`U01208Z05` = `U1208Z5`)
   - a vehicle waiting at its first stop before departure counts as on time
   - a vehicle reported twice under two labels, or reporting a stop that is not on its trip (e.g. during a diversion), is still placed by its position
-  - positions older than 2 minutes are ignored
-- **Where the bus is, for local stop sensors.** Each departure in `next_departures_lines` that has a vehicle on its way also carries `vehicle_realtime` (vehicle label), `current_stop_realtime` (the stop it stands at, or the last one it passed) and `at_stop_realtime` (true while standing there); `-` when no vehicle is on its way yet.
+  - positions older than 2 minutes are ignored; a trip whose vehicle drops out of the feed for a moment keeps its last estimate for up to 5 minutes
+  - a vehicle counts as set off once it moves away from its first stop towards the second between two refreshes; with only one position, one within 300 m of its first stop before departure time is still waiting
+  - more than 2 minutes before its first departure a trip never counts as started: the vehicle is still finishing its previous run or parking at the terminus
+  - a trip seen underway is not shown as not started again when GPS noise puts it back near its first stop
+- **Where the bus is, for local stop sensors.** Each departure in `next_departures_lines` that has a vehicle on its way also carries `vehicle_realtime` (vehicle label), `current_stop_realtime` (the stop it stands at, or the last one it passed) `at_stop_realtime` (true while standing there) and `trip_started_realtime` (false while it is still at or heading to its first stop); `-` when no vehicle is on its way yet.
 
 ## Install with HACS
 
