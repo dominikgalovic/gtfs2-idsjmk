@@ -58,6 +58,7 @@ from .const import (
 
     TIME_STR_FORMAT
 )
+from .vp_delays import derive_trip_updates, has_trip_updates, trip_loader_for
 
 _UNSAFE_FILE_PART = re.compile(r"[^a-z0-9._-]+")
 
@@ -211,6 +212,8 @@ def get_rt_route_trip_statuses(self, feed_entities=None):
         feed_entities = get_gtfs_feed_entities(
             url=self._trip_update_url, headers=self._headers, label="trip_data"
         )
+        if not has_trip_updates(feed_entities):
+            feed_entities = get_trip_updates_from_vehicle_positions(self) or feed_entities
     self._feed_entities = feed_entities
     
     if not feed_entities:
@@ -336,6 +339,31 @@ def get_rt_route_trip_statuses(self, feed_entities=None):
     self.info = departure_times
     _LOGGER.debug("Departure times Route Trip: %s", departure_times)
     return departure_times    
+
+def get_trip_updates_from_vehicle_positions(self):
+    """TripUpdates for the upcoming departures, estimated from vehicle positions, for feeds that publish none."""
+    departure = self._data.get("next_departure") or {}
+    wanted = {}
+    for trip_id, departure_time in zip(
+        departure.get("next_departures_trip_id") or [], departure.get("next_departures") or []
+    ):
+        wanted.setdefault(str(trip_id), []).append(
+            (self._stop_id, None, dt_util.parse_datetime(departure_time))
+        )
+    if not wanted:
+        return []
+    vehicle_entities = get_gtfs_feed_entities(
+        url=self._vehicle_position_url or self._trip_update_url,
+        headers=self._headers,
+        label="vehicle_positions",
+    )
+    return derive_trip_updates(
+        vehicle_entities,
+        wanted,
+        trip_loader_for(self._data["schedule"]),
+        dt_util.utcnow(),
+        dt_util.get_time_zone(self.hass.config.time_zone),
+    )
 
 def get_rt_vehicle_positions(self):
     feed_entities = get_gtfs_feed_entities(

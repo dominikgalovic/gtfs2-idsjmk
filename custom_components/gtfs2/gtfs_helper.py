@@ -38,6 +38,7 @@ from .const import (
     TIME_STR_FORMAT
     )
 from .gtfs_rt_helper import get_rt_route_trip_statuses, get_gtfs_rt, safe_file_part, get_gtfs_feed_entities
+from .vp_delays import derive_trip_updates, has_trip_updates, trip_loader_for
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -1184,6 +1185,34 @@ def _build_local_stop_element(self, row, base_date, date_label,
     }
 
 
+def _local_stop_trip_updates_from_vehicle_positions(self, rows, base_dates, timezone_local):
+    """TripUpdates for the local stops' departures, estimated from vehicle positions, for feeds that publish none."""
+    wanted = {}
+    for row_cursor in rows:
+        row = row_cursor._asdict()
+        zone_name = row["agency_timezone"] or row["stop_timezone"]
+        timezone_agency = dt_util.get_time_zone(zone_name) if zone_name else timezone_local
+        for base_date in base_dates:
+            departure = datetime.datetime.strptime(
+                f"{base_date} {row['departure_time']}", "%Y-%m-%d %H:%M:%S"
+            ).replace(tzinfo=timezone_agency)
+            wanted.setdefault(str(row["trip_id"]), []).append(
+                (row["stop_id"], row["stop_sequence"], departure)
+            )
+    if not wanted:
+        return []
+    vehicle_entities = get_gtfs_feed_entities(
+        url=self._trip_update_url, headers=self._headers, label="vehicle_positions"
+    )
+    return derive_trip_updates(
+        vehicle_entities,
+        wanted,
+        trip_loader_for(self._data["schedule"]),
+        dt_util.utcnow(),
+        timezone_local,
+    )
+
+
 def get_local_stops_next_departures(self):
     # 20260803 Note: this procedure is not using an option to in/exclude 'tomorrow'
     _LOGGER.debug("Get local stop departure with data: %s", self._data)
@@ -1383,6 +1412,10 @@ def get_local_stops_next_departures(self):
         feed_entities = get_gtfs_feed_entities(
             url=self._trip_update_url, headers=self._headers, label="trip_data"
         ) or []
+        if not has_trip_updates(feed_entities):
+            feed_entities = _local_stop_trip_updates_from_vehicle_positions(
+                self, rows, (now_date, tomorrow_date), timezone_local
+            ) or feed_entities
 
     for row_cursor in rows:
         row = row_cursor._asdict()
