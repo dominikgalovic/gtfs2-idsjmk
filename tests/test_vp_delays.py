@@ -48,6 +48,7 @@ def fresh_memory():
     vp._last_matches.clear()
     vp._started_trips.clear()
     vp._last_positions.clear()
+    vp._stop_delays.clear()
     yield
 
 
@@ -92,9 +93,12 @@ def test_has_trip_updates():
     assert vp.has_trip_updates([{"id": "1", "trip_update": {"trip": {"trip_id": "T1"}}}])
 
 
-def test_delay_from_position_between_stops():
-    # halfway between 17:00 and 17:03, a minute behind
-    updates = derive([vehicle(16.005, "U2Z1", at(17, 2, 30))], at(17, 2, 30))
+def test_between_stops_on_time_until_overdue_at_the_next_stop():
+    # halfway between the stops, before the next one (17:03) is due: on time
+    on_time = derive([vehicle(16.005, "U2Z1", at(17, 2, 30))], at(17, 2, 30))
+    assert first_update(on_time)["arrival"] == {"time": int(at(17, 3).timestamp()), "delay": 0}
+    # same place at 17:04:30, a minute and a half past the next stop's time
+    updates = derive([vehicle(16.005, "U2Z1", at(17, 4, 30))], at(17, 4, 30))
     stop = first_update(updates)
     assert stop["stop_id"] == "U2Z1"
     assert stop["arrival"] == {"time": int(at(17, 4).timestamp()), "delay": 60}
@@ -105,14 +109,23 @@ def test_delay_from_position_between_stops():
     }
 
 
-def test_delay_is_whole_minutes_and_moves_the_time_by_the_same():
-    # halfway between the stops the vehicle is expected at 17:01:30
-    late = derive([vehicle(16.005, "U2Z1", at(17, 6, 20))], at(17, 6, 20))
-    assert first_update(late)["arrival"] == {"time": int(at(17, 8).timestamp()), "delay": 300}
-    slightly_late = derive([vehicle(16.005, "U2Z1", at(17, 2, 20))], at(17, 2, 20))
-    assert first_update(slightly_late)["arrival"] == {"time": int(at(17, 4).timestamp()), "delay": 60}
-    nearly_on_time = derive([vehicle(16.005, "U2Z1", at(17, 1, 50))], at(17, 1, 50))
-    assert first_update(nearly_on_time)["arrival"] == {"time": int(at(17, 3).timestamp()), "delay": 0}
+def test_delay_is_whole_minutes_rounded_down_and_moves_the_time_by_the_same():
+    # the next stop was due at 17:03
+    under_two = derive([vehicle(16.005, "U2Z1", at(17, 4, 59))], at(17, 4, 59))
+    assert first_update(under_two)["arrival"] == {"time": int(at(17, 4).timestamp()), "delay": 60}
+    under_one = derive([vehicle(16.005, "U2Z1", at(17, 3, 59))], at(17, 3, 59))
+    assert first_update(under_one)["arrival"] == {"time": int(at(17, 3).timestamp()), "delay": 0}
+
+
+def test_delay_from_leaving_the_last_stop_until_overdue_at_the_next():
+    # stands at the first stop 40 s late, then drives on: still on time although 20 s past the next stop's time
+    derive([vehicle(16.0003, "U2Z1", at(17, 0, 40))], at(17, 0, 40))
+    driving = derive([vehicle(16.005, "U2Z1", at(17, 3, 20))], at(17, 3, 20))
+    assert first_update(driving)["arrival"]["delay"] == 0
+    # stands at the second stop 150 s late, then drives on before the third stop is due: keeps +2
+    derive([vehicle(16.0101, "U3Z1", at(17, 5, 30))], at(17, 5, 30))
+    carried = derive([vehicle(16.015, "U3Z1", at(17, 6))], at(17, 6))
+    assert first_update(carried)["arrival"] == {"time": int(at(17, 8).timestamp()), "delay": 120}
 
 
 def test_padded_stop_id_in_feed():
@@ -192,7 +205,7 @@ def test_standing_late_at_stop_departs_now():
 
 
 def test_reported_stop_not_on_trip_uses_position():
-    updates = derive([vehicle(16.005, "U99Z1", at(17, 2, 30))], at(17, 2, 30))
+    updates = derive([vehicle(16.005, "U99Z1", at(17, 4, 30))], at(17, 4, 30))
     assert first_update(updates)["arrival"]["delay"] == 60
 
 
@@ -229,16 +242,16 @@ def test_trip_past_midnight_uses_previous_service_day():
 
 
 def test_vehicle_dropping_out_keeps_its_last_estimate_for_a_while():
-    derive([vehicle(16.005, "U2Z1", at(17, 2, 30))], at(17, 2, 30))
+    derive([vehicle(16.005, "U2Z1", at(17, 4, 30))], at(17, 4, 30))
 
-    stale = derive([vehicle(16.005, "U2Z1", at(17, 2, 30))], at(17, 6))
+    stale = derive([vehicle(16.005, "U2Z1", at(17, 4, 30))], at(17, 8))
     assert first_update(stale)["arrival"]["delay"] == 60
     assert stale[0]["vehicle_position"]["current_stop"] == "U1Z1"
 
-    feed_failed = derive(None, at(17, 7))
+    feed_failed = derive(None, at(17, 9))
     assert first_update(feed_failed)["arrival"]["delay"] == 60
 
-    assert derive(None, at(17, 7, 31)) == []
+    assert derive(None, at(17, 9, 31)) == []
 
 
 def test_started_trip_does_not_go_back_to_not_started():
@@ -276,7 +289,7 @@ def _route_sensor(stop_id="U3Z1"):
 
 
 def test_route_sensor_reads_the_estimate():
-    now = at(17, 2, 30)
+    now = at(17, 4, 30)
     with freeze_time(now.astimezone(UTC).replace(tzinfo=None), tz_offset=0):
         updates = derive([vehicle(16.005, "U2Z1", now)], now)
         result = gtfs_rt_helper.get_rt_route_trip_statuses(_route_sensor(), updates)
@@ -287,7 +300,7 @@ def test_route_sensor_reads_the_estimate():
 
 
 def test_route_sensor_falls_back_to_vehicle_positions():
-    now = at(17, 2, 30)
+    now = at(17, 4, 30)
     feeds = {
         "trip_data": [{"id": "1", "trip_update": {"trip": {"trip_id": ""}, "stop_time_update": []}}],
         "vehicle_positions": [vehicle(16.005, "U02Z01", now)],

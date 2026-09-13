@@ -5,6 +5,7 @@
 Fork of [vingerha/gtfs2](https://github.com/vingerha/gtfs2) for the South Moravian integrated transport system (IDS JMK). Everything from the original works the same; this fork adds:
 
 - **Delays from vehicle positions.** The IDS JMK realtime feed publishes vehicle positions but no trip updates, so the original integration shows no delays for it. When a feed has no trip updates, this fork estimates them from where each vehicle is on its trip, for start/end sensors and local stop sensors alike. Feeds that do publish trip updates are used as before.
+  - between stops the delay is how late the vehicle left its last stop, and grows only once it is overdue at the next stop; delays are whole minutes rounded down, so under a minute is on time
   - stop ids padded with zeros in the feed are matched (`U01208Z05` = `U1208Z5`)
   - a vehicle waiting at its first stop before departure counts as on time
   - a vehicle reported twice under two labels, or reporting a stop that is not on its trip (e.g. during a diversion), is still placed by its position

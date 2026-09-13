@@ -51,6 +51,7 @@ _memory_lock = threading.Lock()
 _last_matches = {}
 _started_trips = {}
 _last_positions = {}
+_stop_delays = {}
 
 StopTime = namedtuple("StopTime", "stop_id sequence arrival departure lat lon name", defaults=(None,))
 
@@ -184,11 +185,16 @@ def stop_index(stops, stop_id, stop_sequence=None):
     return None
 
 
-def locate(stops, k, lat, lon, t, departed=False):
+def locate(stops, k, lat, lon, t, departed=False, left_stop=None):
     """Where a vehicle heading to stop k is, and its delay at service-day second t.
 
     Feeds report the stop a vehicle heads to, even while it still stands at stop k-1.
     departed: the vehicle was seen moving away from its first stop, so it no longer waits there.
+    left_stop: (stop index, delay) from when the vehicle was last seen standing at a stop.
+
+    Between stops the delay is how late the vehicle left its last stop, growing only once it is
+    overdue at the next one: vehicles dwell, pull out and wait at lights, so assuming a steady
+    pace between stops makes them look late.
     """
     heading = stops[k]
     previous = stops[k - 1] if k > 0 else None
@@ -229,14 +235,13 @@ def locate(stops, k, lat, lon, t, departed=False):
         arrival = arrival_of(heading)
         if arrival is None:
             return None
-        expected = arrival
-        if previous is not None and d_previous is not None and d_heading is not None:
-            start = departure_of(previous)
-            if start is not None:
-                fraction = d_previous / (d_previous + d_heading)
-                expected = start + fraction * (arrival - start)
-        delay = round(t - expected)
-        score = abs(delay)
+        start = departure_of(previous) if previous is not None else None
+        if start is None:
+            start = arrival
+        delay = t - arrival
+        if left_stop is not None and left_stop[0] == k - 1:
+            delay = max(delay, left_stop[1])
+        score = start - t if t < start else max(0, t - arrival)
 
     return {"at_index": at_index, "delay": delay, "score": score, "departed": departed}
 
@@ -287,7 +292,7 @@ def _moved_away(previous, current, first_stop, second_stop):
     return distance_m(lat, lon, second_stop.lat, second_stop.lon) < distance_m(prev_lat, prev_lon, second_stop.lat, second_stop.lon)
 
 
-def _match_vehicle(vehicle, position, stops, day_starts, departed):
+def _match_vehicle(vehicle, position, stops, day_starts, departed, left_stop):
     lat, lon, timestamp = position
 
     k = stop_index(stops, vehicle.get("stop_id")) if vehicle.get("stop_id") else None
@@ -299,7 +304,7 @@ def _match_vehicle(vehicle, position, stops, day_starts, departed):
 
     best = None
     for day_start in day_starts:
-        located = locate(stops, k, lat, lon, timestamp - day_start.timestamp(), departed)
+        located = locate(stops, k, lat, lon, timestamp - day_start.timestamp(), departed, left_stop)
         if located is None or located["score"] > MAX_SCHEDULE_DEVIATION:
             continue
         if best is None or located["score"] < best["score"]:
@@ -316,8 +321,9 @@ def _trip_update(trip_id, trip, match, now_utc, started):
     stops = trip["stops"]
     at_index = match["at_index"]
     first = at_index if at_index is not None else match["k"]
-    # Whole minutes, so a time shown as HH:MM and the delay always agree.
-    delay = max(0, math.floor(match["delay"] / 60 + 0.5) * 60)
+    # Whole minutes rounded down, like timetables where any second of a stop's minute is on time,
+    # so a time shown as HH:MM and the delay always agree.
+    delay = max(0, math.floor(match["delay"] / 60) * 60)
     day_start = match["day_start"].timestamp()
     now = int(now_utc.timestamp())
 
@@ -368,6 +374,8 @@ def _forget_old(now):
             del _started_trips[trip_id]
         for key in [key for key, (_, _, seen) in _last_positions.items() if now - seen > MOVEMENT_WINDOW]:
             del _last_positions[key]
+        for trip_id in [t for t, (_, _, seen) in _stop_delays.items() if now - seen > MOVEMENT_WINDOW]:
+            del _stop_delays[trip_id]
 
 
 def derive_trip_updates(vehicle_entities, wanted, trip_loader, now_utc, time_zone):
@@ -417,7 +425,10 @@ def derive_trip_updates(vehicle_entities, wanted, trip_loader, now_utc, time_zon
                         trip["stops"][1] if len(trip["stops"]) > 1 else None,
                     )
                     _last_positions[key] = position
-                found = _match_vehicle(vehicle, position, trip["stops"], day_starts, departed)
+                    left_stop = _stop_delays.get(trip_id)
+                found = _match_vehicle(
+                    vehicle, position, trip["stops"], day_starts, departed, left_stop[:2] if left_stop else None
+                )
                 if found:
                     matches.append(found)
             # A vehicle can be reported twice under different labels; keep the one fitting the schedule best.
@@ -427,6 +438,8 @@ def derive_trip_updates(vehicle_entities, wanted, trip_loader, now_utc, time_zon
         with _memory_lock:
             if match:
                 _last_matches[trip_id] = (match, now)
+                if match["at_index"] is not None:
+                    _stop_delays[trip_id] = (match["at_index"], match["delay"], now)
             elif remembered:
                 match = remembered[0]
             else:
