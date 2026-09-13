@@ -1120,6 +1120,7 @@ def _build_local_stop_element(self, row, base_date, date_label,
     delay_rt = "-"
     delay_rt_derived = "-"
     departures = []
+    vehicle_rt = None
 
     # Find RT if configured
     if self._realtime:
@@ -1134,6 +1135,8 @@ def _build_local_stop_element(self, row, base_date, date_label,
             delay_rt = delays[0] if delays else "-"
             departure_rt = departures[0] if departures else "-"
             departure_rt_datetime = departure_rt
+            vehicles = svc.get("vehicles", []) if svc else []
+            vehicle_rt = vehicles[0] if vehicles else None
         _LOGGER.debug("Departure rt: %s, Delay rt: %s", departure_rt, delay_rt)
 
     if departure_rt != "-":
@@ -1173,6 +1176,9 @@ def _build_local_stop_element(self, row, base_date, date_label,
         "departure_realtime_datetime": departure_rt_datetime,
         "delay_realtime_derived": delay_rt_derived,
         "delay_realtime": delay_rt,
+        "vehicle_realtime": vehicle_rt["label"] if vehicle_rt else "-",
+        "current_stop_realtime": vehicle_rt["current_stop"] if vehicle_rt else "-",
+        "at_stop_realtime": vehicle_rt["at_stop"] if vehicle_rt else "-",
         "date": date_label,
         "stop_name": row["stop_name"],
         "stop_id": row["stop_id"],

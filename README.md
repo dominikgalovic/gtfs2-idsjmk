@@ -9,6 +9,7 @@ Fork of [vingerha/gtfs2](https://github.com/vingerha/gtfs2) for the South Moravi
   - a vehicle waiting at its first stop before departure counts as on time
   - a vehicle reported twice under two labels, or reporting a stop that is not on its trip (e.g. during a diversion), is still placed by its position
   - positions older than 2 minutes are ignored
+- **Where the bus is, for local stop sensors.** Each departure in `next_departures_lines` that has a vehicle on its way also carries `vehicle_realtime` (vehicle label), `current_stop_realtime` (the stop it stands at, or the last one it passed) and `at_stop_realtime` (true while standing there); `-` when no vehicle is on its way yet.
 
 ## Install with HACS
 

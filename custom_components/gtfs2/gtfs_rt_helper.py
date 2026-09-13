@@ -307,6 +307,7 @@ def get_rt_route_trip_statuses(self, feed_entities=None):
                         ):                 
                             departure_times[self._route_id][direction_id][stop_id]["departures"] = []
                             departure_times[self._route_id][direction_id][stop_id]["delays"] = []
+                            departure_times[self._route_id][direction_id][stop_id]["vehicles"] = []
                         
                         # the later of the two 'time' attributes is the one to announce
                         # e.g. at a terminus/layover where the vehicle stands several
@@ -324,6 +325,7 @@ def get_rt_route_trip_statuses(self, feed_entities=None):
                         if due_in_minutes(departure_dt) >= 0:
                             departure_times[self._route_id][direction_id][stop_id]["departures"].append(departure_dt)
                             departure_times[self._route_id][direction_id][stop_id]["delays"].append(delay)
+                            departure_times[self._route_id][direction_id][stop_id]["vehicles"].append(entity.get("vehicle_position"))
                             _LOGGER.debug("RT stoptime: %s, in utcfromtimestamp: %s", stop_time, departure_dt)
                         else:
                             _LOGGER.debug("Not using realtime stop data for old due-in-minutes: %s", due_in_minutes(departure_dt))

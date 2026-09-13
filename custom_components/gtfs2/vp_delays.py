@@ -25,7 +25,7 @@ MAX_ROUTE_DISTANCE = 300
 # A match whose schedule is further than this many seconds from the vehicle is ignored.
 MAX_SCHEDULE_DEVIATION = 3600
 
-StopTime = namedtuple("StopTime", "stop_id sequence arrival departure lat lon")
+StopTime = namedtuple("StopTime", "stop_id sequence arrival departure lat lon name", defaults=(None,))
 
 _LEADING_ZEROS = re.compile(r"(?<!\d)0+(?=\d)")
 
@@ -78,7 +78,7 @@ def trip_loader_for(schedule):
 def load_trip(schedule, trip_id):
     sql = """
     SELECT st.stop_id, st.stop_sequence, st.arrival_time, st.departure_time,
-           s.stop_lat, s.stop_lon, t.route_id, t.direction_id
+           s.stop_lat, s.stop_lon, t.route_id, t.direction_id, s.stop_name
     FROM stop_times st
     JOIN trips t ON t.trip_id = st.trip_id
     LEFT JOIN stops s ON s.stop_id = st.stop_id
@@ -93,7 +93,7 @@ def load_trip(schedule, trip_id):
         "route_id": rows[0][6],
         "direction_id": rows[0][7],
         "stops": [
-            StopTime(row[0], row[1], parse_gtfs_seconds(row[2]), parse_gtfs_seconds(row[3]), row[4], row[5])
+            StopTime(row[0], row[1], parse_gtfs_seconds(row[2]), parse_gtfs_seconds(row[3]), row[4], row[5], row[8])
             for row in rows
         ],
     }
@@ -246,7 +246,12 @@ def _match_vehicle(vehicle, stops, day_starts, now_utc):
         if located is None or located["score"] > MAX_SCHEDULE_DEVIATION:
             continue
         if best is None or located["score"] < best["score"]:
-            best = {**located, "k": k, "day_start": day_start}
+            best = {
+                **located,
+                "k": k,
+                "day_start": day_start,
+                "label": str((vehicle.get("vehicle") or {}).get("label") or ""),
+            }
     return best
 
 
@@ -279,9 +284,16 @@ def _trip_update(trip_id, trip, match, now_utc):
     trip_descriptor = {"trip_id": trip_id, "route_id": trip["route_id"]}
     if trip["direction_id"] not in (None, ""):
         trip_descriptor["direction_id"] = str(trip["direction_id"])
+    current = stops[at_index] if at_index is not None else stops[max(match["k"] - 1, 0)]
     return {
         "id": trip_id,
         "trip_update": {"trip": trip_descriptor, "stop_time_update": stop_time_updates},
+        # Not part of a TripUpdate: where the vehicle is, for sensors that show it.
+        "vehicle_position": {
+            "label": match["label"],
+            "current_stop": current.name or current.stop_id,
+            "at_stop": at_index is not None,
+        },
     }
 
 

@@ -91,6 +91,7 @@ def test_delay_from_position_between_stops():
     assert stop["arrival"] == {"time": int(at(17, 4).timestamp()), "delay": 60}
     trip = updates[0]["trip_update"]["trip"]
     assert trip == {"trip_id": "T1", "route_id": "R31", "direction_id": "0"}
+    assert updates[0]["vehicle_position"] == {"label": "3664", "current_stop": "U1Z1", "at_stop": False}
 
 
 def test_padded_stop_id_in_feed():
@@ -104,6 +105,7 @@ def test_waiting_at_terminus_before_departure_is_on_time():
     stop = first_update(updates)
     assert stop["stop_id"] == "U1Z1"
     assert stop["departure"] == {"time": int(at(17, 0).timestamp()), "delay": 0}
+    assert updates[0]["vehicle_position"] == {"label": "3664", "current_stop": "U1Z1", "at_stop": True}
 
 
 def test_standing_late_at_stop_departs_now():
@@ -185,6 +187,7 @@ def test_route_sensor_reads_the_estimate():
     at_stop = result["R31"]["0"]["U3Z1"]
     assert at_stop["departures"][0].timestamp() == at(17, 7).timestamp()
     assert at_stop["delays"] == [60]
+    assert at_stop["vehicles"] == [{"label": "3664", "current_stop": "U1Z1", "at_stop": False}]
 
 
 def test_route_sensor_falls_back_to_vehicle_positions():
