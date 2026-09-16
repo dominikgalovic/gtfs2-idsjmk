@@ -6,6 +6,8 @@ Fork of [vingerha/gtfs2](https://github.com/vingerha/gtfs2) for the South Moravi
 
 - **Delays from vehicle positions.** The IDS JMK realtime feed publishes vehicle positions but no trip updates, so the original integration shows no delays for it. When a feed has no trip updates, this fork estimates them from where each vehicle is on its trip, for start/end sensors and local stop sensors alike. Feeds that do publish trip updates are used as before.
   - between stops the delay is how late the vehicle left its last stop, and grows only once it is overdue at the next stop; delays are whole minutes rounded down, so under a minute is on time
+  - a departure stays listed, its delay counting up, until the feed reports the vehicle past that stop; a departure with no realtime data at all stays for `DEFAULT_NO_REALTIME_GRACE` minutes past its scheduled time rather than vanishing as if it had left
+  - while a vehicle reports nothing its delay is frozen at the last reported value instead of counting up, and `realtime_age` (seconds since that report) lets a dashboard mark the row as not reporting
   - stop ids padded with zeros in the feed are matched (`U01208Z05` = `U1208Z5`)
   - a vehicle waiting at its first stop before departure counts as on time
   - a vehicle reported twice under two labels, or reporting a stop that is not on its trip (e.g. during a diversion), is still placed by its position
@@ -13,6 +15,7 @@ Fork of [vingerha/gtfs2](https://github.com/vingerha/gtfs2) for the South Moravi
   - a vehicle counts as set off once it moves away from its first stop towards the second between two refreshes; with only one position, one within 300 m of its first stop before departure time is still waiting
   - more than 2 minutes before its first departure a trip never counts as started: the vehicle is still finishing its previous run or parking at the terminus
   - a trip seen underway is not shown as not started again when GPS noise puts it back near its first stop
+- **Line alerts on local stop sensors.** Alerts in the realtime feed name lines rather than stops, so each departure carries a summary of its line's alerts in `alert`, and each sensor lists them in full in `alerts`. Only alerts whose effect means a disruption are kept (`ALERT_DISRUPTION_EFFECTS`): general "new timetables from date X" bulletins carry no validity period and stay in the feed for months. Read from the feed the sensor already downloads.
 - **Where the bus is, for local stop sensors.** Each departure in `next_departures_lines` that has a vehicle on its way also carries `vehicle_realtime` (vehicle label), `current_stop_realtime` (the stop it stands at, or the last one it passed) `at_stop_realtime` (true while standing there) and `trip_started_realtime` (false while it is still at or heading to its first stop); `-` when no vehicle is on its way yet.
 
 ## Install with HACS

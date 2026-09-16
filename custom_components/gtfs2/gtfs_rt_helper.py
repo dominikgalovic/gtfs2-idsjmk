@@ -56,7 +56,8 @@ from .const import (
     DEFAULT_PATH,
     DEFAULT_PATH_GEOJSON,
 
-    TIME_STR_FORMAT
+    TIME_STR_FORMAT,
+    ALERT_DISRUPTION_EFFECTS,
 )
 from .vp_delays import derive_trip_updates, has_trip_updates, trip_loader_for
 
@@ -428,6 +429,39 @@ def get_rt_vehicle_positions(self):
     update_geojson(self)
     return geojson_body
     
+def _alert_text(translated):
+    for translation in translated.translation:
+        if translation.text:
+            return translation.text.strip()
+    return ""
+
+
+def get_rt_alerts_by_line(feed_entities):
+    """Alerts keyed by the line they name.
+
+    Feeds such as IDS JMK name lines in informed_entity rather than stops, and the line there is
+    the public number (31, S6), not the route_id of the static data.
+    """
+    alerts = {}
+    for entity in feed_entities or []:
+        if not hasattr(entity, "HasField") or not entity.HasField("alert"):
+            continue
+        if entity.alert.effect not in ALERT_DISRUPTION_EFFECTS:
+            continue
+        header = _alert_text(entity.alert.header_text)
+        description = _alert_text(entity.alert.description_text)
+        if not header and not description:
+            continue
+        for informed in entity.alert.informed_entity:
+            line = informed.route_id.strip()
+            if not line:
+                continue
+            alert = {"header": header, "description": description}
+            if alert not in alerts.setdefault(line, []):
+                alerts[line].append(alert)
+    return alerts
+
+
 def get_rt_alerts(self):
     rt_alerts = {}
     if (self._alerts_url)[:4] == "http":

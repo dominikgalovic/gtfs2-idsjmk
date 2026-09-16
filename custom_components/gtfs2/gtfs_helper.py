@@ -27,8 +27,9 @@ from .const import (
     CONF_API_KEY_LOCATION,
     CONF_API_KEY_NAME,
     CONF_ACCEPT_HEADER_PB,
-    DEFAULT_LOCAL_STOP_TIMERANGE, 
+    DEFAULT_LOCAL_STOP_TIMERANGE,
     DEFAULT_LOCAL_STOP_TIMERANGE_HISTORY,
+    DEFAULT_NO_REALTIME_GRACE,
     DEFAULT_LOCAL_STOP_RADIUS,
     DEFAULT_PATH_RT,
     DEFAULT_PATH,
@@ -37,7 +38,7 @@ from .const import (
     DOMAIN,
     TIME_STR_FORMAT
     )
-from .gtfs_rt_helper import get_rt_route_trip_statuses, get_gtfs_rt, safe_file_part, get_gtfs_feed_entities
+from .gtfs_rt_helper import get_rt_route_trip_statuses, get_gtfs_rt, safe_file_part, get_gtfs_feed_entities, get_rt_alerts_by_line
 from .vp_delays import derive_trip_updates, has_trip_updates, trip_loader_for
 
 _LOGGER = logging.getLogger(__name__)
@@ -1086,7 +1087,7 @@ def get_local_stop_list(hass, schedule, data):
 
 def _build_local_stop_element(self, row, base_date, date_label,
                               timezone_agency, timezone_stop, now_tz,
-                              apply_now_filter, feed_entities=None):
+                              apply_now_filter, feed_entities=None, alerts_by_line=None):
     """Build one departure element incl. realtime, for a given service date.
 
     base_date / date_label: 'now_date' for today, 'tomorrow_date' for tomorrow.
@@ -1166,8 +1167,12 @@ def _build_local_stop_element(self, row, base_date, date_label,
     #_LOGGER.debug("Departure time corrected: %s", depart_time_corrected)
 
     if apply_now_filter and not (depart_time_corrected > now_tz):
-        _LOGGER.debug("Departure time corrected: %s, NOT after now in tz with offset: %s", depart_time_corrected, now_tz)
-        return None
+        # Without realtime data nothing reported that the vehicle left, so keep the departure
+        # listed for a while instead of dropping it the minute its scheduled time passes.
+        grace = datetime.timedelta(minutes=DEFAULT_NO_REALTIME_GRACE if departure_rt == "-" else 0)
+        if not (depart_time_corrected + grace > now_tz):
+            _LOGGER.debug("Departure time corrected: %s, NOT after now in tz with offset: %s", depart_time_corrected, now_tz)
+            return None
 
     return {
         "departure": self._departure_time,
@@ -1180,6 +1185,14 @@ def _build_local_stop_element(self, row, base_date, date_label,
         "current_stop_realtime": vehicle_rt["current_stop"] if vehicle_rt else "-",
         "at_stop_realtime": vehicle_rt["at_stop"] if vehicle_rt else "-",
         "trip_started_realtime": vehicle_rt["started"] if vehicle_rt else "-",
+        "realtime_age": vehicle_rt["age"] if vehicle_rt else "-",
+        # A summary per departure; the full texts sit once per sensor, in its alerts attribute.
+        "alert": "\n".join(
+            " – ".join(
+                part for part in (alert["header"], alert["description"].split("\n", 1)[0].strip()) if part
+            )
+            for alert in (alerts_by_line or {}).get(row["route_short_name"], [])
+        ),
         "date": date_label,
         "stop_name": row["stop_name"],
         "stop_id": row["stop_id"],
@@ -1414,11 +1427,16 @@ def get_local_stops_next_departures(self):
     # against it, so fetching it once and passing it into each match call is
     # equivalent and avoids the redundant work.
     feed_entities = None
+    alerts_by_line = {}
     if self._realtime:
 
         feed_entities = get_gtfs_feed_entities(
             url=self._trip_update_url, headers=self._headers, label="trip_data"
         ) or []
+        # The same, already downloaded feed read for its alerts: they name lines, not stops.
+        alerts_by_line = get_rt_alerts_by_line(
+            get_gtfs_feed_entities(url=self._trip_update_url, headers=self._headers, label="alerts")
+        )
         if not has_trip_updates(feed_entities):
             feed_entities = _local_stop_trip_updates_from_vehicle_positions(
                 self, rows, (now_date, tomorrow_date), timezone_local
@@ -1460,7 +1478,7 @@ def get_local_stops_next_departures(self):
             #_t_elem_start = time.monotonic()
             element = _build_local_stop_element(
                 self, row, now_date, now_date, timezone_agency, timezone_stop, now_tz,
-                apply_now_filter=True, feed_entities=feed_entities)
+                apply_now_filter=True, feed_entities=feed_entities, alerts_by_line=alerts_by_line)
             if element is not None:					  
                 if element not in timetable:
                     timetable.append(element)
@@ -1471,7 +1489,7 @@ def get_local_stops_next_departures(self):
 
             element = _build_local_stop_element(
                 self, row, tomorrow_date, tomorrow_date, timezone_agency, timezone_stop, now_tz,
-                apply_now_filter=False, feed_entities=feed_entities)
+                apply_now_filter=False, feed_entities=feed_entities, alerts_by_line=alerts_by_line)
 
             if element is not None:
                 if element not in timetable:
@@ -1488,6 +1506,12 @@ def get_local_stops_next_departures(self):
 
     for stop in local_stops_list:
         stop["departure"].sort(key=lambda d: d["departure_datetime"])
+        stop["alerts"] = []
+        for line in sorted({departure["route"] for departure in stop["departure"]}):
+            for alert in alerts_by_line.get(line, []):
+                listed = {"line": line, **alert}
+                if listed not in stop["alerts"]:
+                    stop["alerts"].append(listed)
 
     data_returned = local_stops_list
     _LOGGER.debug("Stop data returned: %s", data_returned)

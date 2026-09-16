@@ -567,8 +567,9 @@ class GTFSLocalStopSensor(CoordinatorEntity, SensorEntity):
             for stop in self._departure:
                 if stop["stop_id"] == self._stop["stop_id"]:
                     self._attributes["next_departures_lines"] = stop["departure"]
-                    self._attributes["latitude"] = stop["latitude"]  
-                    self._attributes["longitude"] = stop["longitude"]  
+                    self._attributes["latitude"] = stop["latitude"]
+                    self._attributes["longitude"] = stop["longitude"]
+                    self._attributes["alerts"] = stop.get("alerts", [])
                     
         self._attr_extra_state_attributes = self._attributes
         return self._attr_extra_state_attributes

@@ -8,7 +8,10 @@ DEFAULT_REFRESH_INTERVAL = 15
 DEFAULT_OFFSET = 0
 DEFAULT_LOCAL_STOP_REFRESH_INTERVAL = 15
 DEFAULT_LOCAL_STOP_TIMERANGE = 30
-DEFAULT_LOCAL_STOP_TIMERANGE_HISTORY = 15
+DEFAULT_LOCAL_STOP_TIMERANGE_HISTORY = 45
+# minutes a departure without any realtime data stays listed past its scheduled time,
+# since nothing reported that the vehicle left
+DEFAULT_NO_REALTIME_GRACE = 5
 DEFAULT_LOCAL_STOP_RADIUS = 200
 DEFAULT_MAX_LOCAL_STOPS = 15
 
@@ -310,5 +313,10 @@ DEFAULT_DIRECTION = "0"
 DEFAULT_API_KEY_NAME = "api_key"
 
 TIME_STR_FORMAT = "%H:%M"
+
+# Alert effects that mean a disruption: NO_SERVICE, REDUCED_SERVICE, SIGNIFICANT_DELAYS,
+# DETOUR and STOP_MOVED. Other effects carry general bulletins, such as new timetables
+# from a given date, which have no validity period and stay in the feed for months.
+ALERT_DISRUPTION_EFFECTS = (1, 2, 3, 4, 9)
 
 

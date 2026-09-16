@@ -313,6 +313,7 @@ def _match_vehicle(vehicle, position, stops, day_starts, departed, left_stop):
                 "k": k,
                 "day_start": day_start,
                 "label": _label(vehicle),
+                "timestamp": timestamp,
             }
     return best
 
@@ -326,23 +327,33 @@ def _trip_update(trip_id, trip, match, now_utc, started):
     delay = max(0, math.floor(match["delay"] / 60) * 60)
     day_start = match["day_start"].timestamp()
     now = int(now_utc.timestamp())
+    age = max(0, now - int(match["timestamp"]))
+    reporting = age <= MAX_POSITION_AGE
 
     stop_time_updates = []
     for index in range(first, len(stops)):
         stop = stops[index]
         if arrival_of(stop) is None:
             continue
-        arrival = int(day_start + arrival_of(stop) + delay)
-        departure = int(day_start + departure_of(stop) + delay)
-        if index == at_index:
-            # still standing there, so it has not left yet
-            departure = max(departure, now)
+        if reporting:
+            # The vehicle has not reached this stop yet, so it cannot have called there in the
+            # past: once the stop's time has passed, it is late by at least that much.
+            overdue = math.floor((now - (day_start + departure_of(stop))) / 60) * 60
+            stop_delay = max(delay, overdue)
+        else:
+            # Nothing is being reported, so the delay stays at its last known value.
+            stop_delay = delay
+        arrival = int(day_start + arrival_of(stop) + stop_delay)
+        departure = int(day_start + departure_of(stop) + stop_delay)
+        if departure < now:
+            # Not reported past this stop, so it cannot be shown as already gone.
+            departure = now
             arrival = min(arrival, departure)
         stop_time_updates.append({
             "stop_id": stop.stop_id,
             "stop_sequence": stop.sequence,
-            "arrival": {"time": arrival, "delay": delay},
-            "departure": {"time": departure, "delay": delay},
+            "arrival": {"time": arrival, "delay": stop_delay},
+            "departure": {"time": departure, "delay": stop_delay},
         })
 
     trip_descriptor = {"trip_id": trip_id, "route_id": trip["route_id"]}
@@ -358,6 +369,7 @@ def _trip_update(trip_id, trip, match, now_utc, started):
             "current_stop": current.name or current.stop_id,
             "at_stop": at_index is not None,
             "started": started,
+            "age": age,
         },
     }
 
