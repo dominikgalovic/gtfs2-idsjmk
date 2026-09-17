@@ -9,9 +9,6 @@ DEFAULT_OFFSET = 0
 DEFAULT_LOCAL_STOP_REFRESH_INTERVAL = 15
 DEFAULT_LOCAL_STOP_TIMERANGE = 30
 DEFAULT_LOCAL_STOP_TIMERANGE_HISTORY = 45
-# minutes a departure without any realtime data stays listed past its scheduled time,
-# since nothing reported that the vehicle left
-DEFAULT_NO_REALTIME_GRACE = 5
 DEFAULT_LOCAL_STOP_RADIUS = 200
 DEFAULT_MAX_LOCAL_STOPS = 15
 

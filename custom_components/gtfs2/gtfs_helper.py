@@ -29,7 +29,6 @@ from .const import (
     CONF_ACCEPT_HEADER_PB,
     DEFAULT_LOCAL_STOP_TIMERANGE,
     DEFAULT_LOCAL_STOP_TIMERANGE_HISTORY,
-    DEFAULT_NO_REALTIME_GRACE,
     DEFAULT_LOCAL_STOP_RADIUS,
     DEFAULT_PATH_RT,
     DEFAULT_PATH,
@@ -1167,12 +1166,8 @@ def _build_local_stop_element(self, row, base_date, date_label,
     #_LOGGER.debug("Departure time corrected: %s", depart_time_corrected)
 
     if apply_now_filter and not (depart_time_corrected > now_tz):
-        # Without realtime data nothing reported that the vehicle left, so keep the departure
-        # listed for a while instead of dropping it the minute its scheduled time passes.
-        grace = datetime.timedelta(minutes=DEFAULT_NO_REALTIME_GRACE if departure_rt == "-" else 0)
-        if not (depart_time_corrected + grace > now_tz):
-            _LOGGER.debug("Departure time corrected: %s, NOT after now in tz with offset: %s", depart_time_corrected, now_tz)
-            return None
+        _LOGGER.debug("Departure time corrected: %s, NOT after now in tz with offset: %s", depart_time_corrected, now_tz)
+        return None
 
     return {
         "departure": self._departure_time,
