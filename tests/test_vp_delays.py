@@ -222,6 +222,14 @@ def test_unknown_stop_id_counts_as_a_sighting_at_a_stop():
     }
 
 
+def test_age_counts_from_the_last_position_in_the_feed_not_the_last_sighting():
+    # sighted at the second stop at 17:05, then only positions we cannot place
+    derive([vehicle(16.0101, "U99Z1", at(17, 5))], at(17, 5))
+    # the newest position is 17:06:30, too old to use but newer than that sighting
+    updates = derive([vehicle(16.015, "U99Z1", at(17, 6, 30))], at(17, 9))
+    assert updates[0]["vehicle_position"]["age"] == 150
+
+
 def test_after_a_sighting_the_delay_is_carried_not_grown():
     # seen at the second stop two minutes late, then out of reach of every stop
     derive([vehicle(16.0101, "U99Z1", at(17, 5))], at(17, 5))

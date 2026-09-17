@@ -312,7 +312,7 @@ def _match_vehicle(vehicle, position, stops, day_starts, departed, left_stop):
     return best
 
 
-def _trip_update(trip_id, trip, match, now_utc, started):
+def _trip_update(trip_id, trip, match, now_utc, started, last_seen=None):
     stops = trip["stops"]
     at_index = match["at_index"]
     first = at_index if at_index is not None else match["k"]
@@ -321,7 +321,9 @@ def _trip_update(trip_id, trip, match, now_utc, started):
     delay = max(0, math.floor(match["delay"] / 60) * 60)
     day_start = match["day_start"].timestamp()
     now = int(now_utc.timestamp())
-    age = max(0, now - int(match["timestamp"]))
+    # How long since the feed last carried a position for this vehicle, which is not the same as
+    # the last position we could place: a train between stations reports without being placeable.
+    age = max(0, now - int(last_seen or match["timestamp"]))
 
     stop_time_updates = []
     for index in range(first, len(stops)):
@@ -458,5 +460,6 @@ def derive_trip_updates(vehicle_entities, wanted, trip_loader, now_utc, time_zon
             if started:
                 _started_trips[trip_id] = now
 
-        updates.append(_trip_update(trip_id, trip, match, now_utc, started))
+        last_seen = max((vehicle.get("timestamp") or 0) for vehicle in vehicles) if vehicles else None
+        updates.append(_trip_update(trip_id, trip, match, now_utc, started, last_seen))
     return updates
