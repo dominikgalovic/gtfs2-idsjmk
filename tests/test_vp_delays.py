@@ -176,11 +176,17 @@ def test_bus_moving_to_its_layover_spot_long_before_departure_has_not_started():
 
 
 def test_vehicle_still_on_its_previous_run_has_not_started():
-    # already assigned this trip, but driving the route's streets 1.8 km away, fifteen minutes early
-    updates = derive([vehicle(16.025, "U99Z1", at(16, 45))], at(16, 45))
+    # already assigned this trip, but 1.8 km down the route fifteen minutes early
+    updates = derive([vehicle(16.025, "U4Z1", at(16, 45))], at(16, 45))
     assert updates[0]["vehicle_position"]["started"] is False
     assert first_update(updates)["stop_id"] == "U1Z1"
     assert first_update(updates)["departure"] == {"time": int(at(17, 0).timestamp()), "delay": 0}
+
+
+def test_unknown_stop_id_away_from_every_stop_reports_nothing():
+    # the timetable has no such stop and the vehicle is at none of the trip's stops:
+    # nothing is known about where it is, so nothing is invented
+    assert derive([vehicle(16.025, "U99Z1", at(16, 45))], at(16, 45)) == []
 
 
 def test_bus_pulling_up_to_its_first_stop_has_not_started():
@@ -204,9 +210,28 @@ def test_standing_late_at_stop_departs_now():
     assert stop["departure"]["time"] == int(now.timestamp())
 
 
-def test_reported_stop_not_on_trip_uses_position():
-    updates = derive([vehicle(16.005, "U99Z1", at(17, 4, 30))], at(17, 4, 30))
-    assert first_update(updates)["arrival"]["delay"] == 60
+def test_unknown_stop_id_counts_as_a_sighting_at_a_stop():
+    # a railway code the timetable lacks, but the vehicle is 7 m from the second stop (due 17:03)
+    now = at(17, 5)
+    updates = derive([vehicle(16.0101, "U99Z1", now)], now)
+    stop = first_update(updates)
+    assert stop["stop_id"] == "U2Z1"
+    assert stop["departure"] == {"time": int(now.timestamp()), "delay": 120}
+    assert updates[0]["vehicle_position"] == {
+        "label": "3664", "current_stop": "U2Z1", "at_stop": True, "started": True, "age": 0,
+    }
+
+
+def test_after_a_sighting_the_delay_is_carried_not_grown():
+    # seen at the second stop two minutes late, then out of reach of every stop
+    derive([vehicle(16.0101, "U99Z1", at(17, 5))], at(17, 5))
+    later = derive([vehicle(16.015, "U99Z1", at(17, 7))], at(17, 7))
+    stop = first_update(later)
+    assert stop["stop_id"] == "U3Z1"          # on its way to the third stop
+    assert stop["departure"]["delay"] == 120  # still the delay measured at the second
+    assert later[0]["vehicle_position"] == {
+        "label": "3664", "current_stop": "U2Z1", "at_stop": False, "started": True, "age": 0,
+    }
 
 
 def test_stale_position_is_ignored():
@@ -255,17 +280,20 @@ def test_trip_past_midnight_uses_previous_service_day():
 def test_vehicle_dropping_out_keeps_its_last_estimate_for_a_while():
     derive([vehicle(16.005, "U2Z1", at(17, 4, 30))], at(17, 4, 30))
 
-    # nothing is being reported any more: the delay freezes, the row stays, the age grows
+    # the position went stale but the feed still carries the trip, so nothing reported the vehicle
+    # past the stop: the row stays and keeps counting up, while its age shows the data is old
     stale = derive([vehicle(16.005, "U2Z1", at(17, 4, 30))], at(17, 8))
-    assert first_update(stale)["departure"] == {"time": int(at(17, 8).timestamp()), "delay": 60}
+    assert first_update(stale)["departure"] == {"time": int(at(17, 8).timestamp()), "delay": 300}
     assert stale[0]["vehicle_position"]["current_stop"] == "U1Z1"
     assert stale[0]["vehicle_position"]["age"] == 210
 
+    # the trip is gone from the feed too: the last estimate is kept briefly, then dropped
     feed_failed = derive(None, at(17, 9))
-    assert first_update(feed_failed)["departure"] == {"time": int(at(17, 9).timestamp()), "delay": 60}
+    assert first_update(feed_failed)["departure"] == {"time": int(at(17, 9).timestamp()), "delay": 360}
     assert feed_failed[0]["vehicle_position"]["age"] == 270
 
-    assert derive(None, at(17, 9, 31)) == []
+    # five minutes after the feed last carried the trip, the estimate is forgotten
+    assert derive(None, at(17, 13, 1)) == []
 
 
 def test_started_trip_does_not_go_back_to_not_started():

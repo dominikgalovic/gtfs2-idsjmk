@@ -7,10 +7,10 @@ Fork of [vingerha/gtfs2](https://github.com/vingerha/gtfs2) for the South Moravi
 - **Delays from vehicle positions.** The IDS JMK realtime feed publishes vehicle positions but no trip updates, so the original integration shows no delays for it. When a feed has no trip updates, this fork estimates them from where each vehicle is on its trip, for start/end sensors and local stop sensors alike. Feeds that do publish trip updates are used as before.
   - between stops the delay is how late the vehicle left its last stop, and grows only once it is overdue at the next stop; delays are whole minutes rounded down, so under a minute is on time
   - a departure stays listed, its delay counting up, until the feed reports the vehicle past that stop, and then drops out as usual
-  - while a vehicle reports nothing its delay is frozen at the last reported value instead of counting up, and `realtime_age` (seconds since that report) lets a dashboard mark the row as not reporting
+  - a departure keeps counting up while the feed still carries its trip, since nothing has reported the vehicle past the stop; `realtime_age` (seconds since the last position) lets a dashboard mark a row whose vehicle has gone quiet
   - stop ids padded with zeros in the feed are matched (`U01208Z05` = `U1208Z5`)
   - a vehicle waiting at its first stop before departure counts as on time
-  - a vehicle reported twice under two labels, or reporting a stop that is not on its trip (e.g. during a diversion), is still placed by its position
+  - a vehicle reported twice under two labels is kept once; when the feed names a stop the timetable does not have (railway codes, diversions), only a sighting within 200 m of one of the trip's own stops counts, and nothing is inferred about where the vehicle is between stops
   - positions older than 2 minutes are ignored; a trip whose vehicle drops out of the feed for a moment keeps its last estimate for up to 5 minutes
   - a vehicle counts as set off once it moves away from its first stop towards the second between two refreshes; with only one position, one within 300 m of its first stop before departure time is still waiting
   - more than 2 minutes before its first departure a trip never counts as started: the vehicle is still finishing its previous run or parking at the terminus

@@ -27,9 +27,10 @@ LAYOVER_RADIUS = 300
 # placed on the route earlier is still finishing its previous run or repositioning at the terminus.
 EARLY_DEPARTURE = 120
 
-# A vehicle whose reported stop is not on its trip is placed on the nearest
-# stretch between two of the trip's stops, when within this many metres of it.
-MAX_ROUTE_DISTANCE = 300
+# When the feed names a stop the timetable does not have (railway codes, diversions), only a
+# sighting counts: a vehicle this close to one of the trip's stops is taken to be at it, and
+# nothing at all is inferred about where it is between stops.
+NEAR_STOP_RADIUS = 200
 
 # A match whose schedule is further than this many seconds from the vehicle is ignored.
 MAX_SCHEDULE_DEVIATION = 3600
@@ -147,27 +148,14 @@ def _distance_to_stop(lat, lon, stop):
     return distance_m(lat, lon, stop.lat, stop.lon)
 
 
-def distance_to_segment(lat, lon, a, b):
-    kx = 6371000 * math.cos(math.radians(lat)) * math.pi / 180
-    ky = 6371000 * math.pi / 180
-    ax, ay = (a.lon - lon) * kx, (a.lat - lat) * ky
-    bx, by = (b.lon - lon) * kx, (b.lat - lat) * ky
-    dx, dy = bx - ax, by - ay
-    length2 = dx * dx + dy * dy
-    t = 0 if length2 == 0 else max(0, min(1, -(ax * dx + ay * dy) / length2))
-    return math.hypot(ax + t * dx, ay + t * dy)
-
-
-def segment_from_position(stops, lat, lon):
-    best_k, best_distance = None, None
-    for k in range(1, len(stops)):
-        a, b = stops[k - 1], stops[k]
-        if None in (a.lat, a.lon, b.lat, b.lon):
-            continue
-        d = distance_to_segment(lat, lon, a, b)
-        if d <= MAX_ROUTE_DISTANCE and (best_distance is None or d < best_distance):
-            best_k, best_distance = k, d
-    return best_k
+def nearest_stop(stops, lat, lon):
+    """The trip's stop the vehicle is standing at, or None when it is not at one of them."""
+    best_index, best_distance = None, None
+    for index, stop in enumerate(stops):
+        d = _distance_to_stop(lat, lon, stop)
+        if d is not None and d <= NEAR_STOP_RADIUS and (best_distance is None or d < best_distance):
+            best_index, best_distance = index, d
+    return best_index
 
 
 def stop_index(stops, stop_id, stop_sequence=None):
@@ -185,12 +173,13 @@ def stop_index(stops, stop_id, stop_sequence=None):
     return None
 
 
-def locate(stops, k, lat, lon, t, departed=False, left_stop=None):
+def locate(stops, k, lat, lon, t, departed=False, left_stop=None, seen_at=None):
     """Where a vehicle heading to stop k is, and its delay at service-day second t.
 
     Feeds report the stop a vehicle heads to, even while it still stands at stop k-1.
     departed: the vehicle was seen moving away from its first stop, so it no longer waits there.
     left_stop: (stop index, delay) from when the vehicle was last seen standing at a stop.
+    seen_at: the vehicle was sighted at this stop, which settles where it is.
 
     Between stops the delay is how late the vehicle left its last stop, growing only once it is
     overdue at the next one: vehicles dwell, pull out and wait at lights, so assuming a steady
@@ -206,7 +195,9 @@ def locate(stops, k, lat, lon, t, departed=False, left_stop=None):
     departed = departed and not too_early
 
     at_index = None
-    if d_previous is not None and d_previous <= STOP_RADIUS and not (departed and k == 1):
+    if seen_at is not None:
+        at_index = seen_at
+    elif d_previous is not None and d_previous <= STOP_RADIUS and not (departed and k == 1):
         at_index = k - 1
     elif d_heading is not None and d_heading <= STOP_RADIUS and not (departed and k == 0):
         at_index = k
@@ -214,7 +205,7 @@ def locate(stops, k, lat, lon, t, departed=False, left_stop=None):
     # Before its first departure a vehicle lays over near the terminus, often further than
     # STOP_RADIUS from the stop; with no earlier position to show it moving, distance decides.
     d_first = d_previous if k == 1 else d_heading if k == 0 else None
-    if not departed and first_departure is not None and t < first_departure and (
+    if seen_at is None and not departed and first_departure is not None and t < first_departure and (
         too_early or (at_index is None and d_first is not None and d_first <= LAYOVER_RADIUS)
     ):
         at_index = 0
@@ -296,15 +287,18 @@ def _match_vehicle(vehicle, position, stops, day_starts, departed, left_stop):
     lat, lon, timestamp = position
 
     k = stop_index(stops, vehicle.get("stop_id")) if vehicle.get("stop_id") else None
-    # The reported stop is sometimes not on the trip even though the vehicle is (e.g. a diversion).
+    seen_at = None
     if k is None:
-        k = segment_from_position(stops, lat, lon)
-    if k is None:
-        return None
+        # The feed named a stop the timetable does not have. Only a sighting at one of the trip's
+        # own stops settles anything; between stops nothing is known and nothing is invented.
+        seen_at = nearest_stop(stops, lat, lon)
+        if seen_at is None:
+            return None
+        k = min(seen_at + 1, len(stops) - 1)
 
     best = None
     for day_start in day_starts:
-        located = locate(stops, k, lat, lon, timestamp - day_start.timestamp(), departed, left_stop)
+        located = locate(stops, k, lat, lon, timestamp - day_start.timestamp(), departed, left_stop, seen_at)
         if located is None or located["score"] > MAX_SCHEDULE_DEVIATION:
             continue
         if best is None or located["score"] < best["score"]:
@@ -328,27 +322,18 @@ def _trip_update(trip_id, trip, match, now_utc, started):
     day_start = match["day_start"].timestamp()
     now = int(now_utc.timestamp())
     age = max(0, now - int(match["timestamp"]))
-    reporting = age <= MAX_POSITION_AGE
 
     stop_time_updates = []
     for index in range(first, len(stops)):
         stop = stops[index]
         if arrival_of(stop) is None:
             continue
-        if reporting:
-            # The vehicle has not reached this stop yet, so it cannot have called there in the
-            # past: once the stop's time has passed, it is late by at least that much.
-            overdue = math.floor((now - (day_start + departure_of(stop))) / 60) * 60
-            stop_delay = max(delay, overdue)
-        else:
-            # Nothing is being reported, so the delay stays at its last known value.
-            stop_delay = delay
+        # Nothing has reported the vehicle past this stop, so it cannot have called there in the
+        # past: once the stop's time has passed, it is late by at least that much.
+        overdue = math.floor((now - (day_start + departure_of(stop))) / 60) * 60
+        stop_delay = max(delay, overdue)
         arrival = int(day_start + arrival_of(stop) + stop_delay)
         departure = int(day_start + departure_of(stop) + stop_delay)
-        if departure < now:
-            # Not reported past this stop, so it cannot be shown as already gone.
-            departure = now
-            arrival = min(arrival, departure)
         stop_time_updates.append({
             "stop_id": stop.stop_id,
             "stop_sequence": stop.sequence,
@@ -420,6 +405,7 @@ def derive_trip_updates(vehicle_entities, wanted, trip_loader, now_utc, time_zon
             continue
 
         match = None
+        still_reporting = None
         if vehicles:
             day_starts = _service_day_starts(trip["stops"], wanted[trip_id], time_zone)
             matches = []
@@ -427,6 +413,7 @@ def derive_trip_updates(vehicle_entities, wanted, trip_loader, now_utc, time_zon
                 position = _position(vehicle, now_utc)
                 if position is None:
                     continue
+                still_reporting = max(still_reporting or 0, position[2])
                 # Per label: two units in one vehicle report positions metres apart.
                 key = (trip_id, _label(vehicle))
                 with _memory_lock:
@@ -453,7 +440,17 @@ def derive_trip_updates(vehicle_entities, wanted, trip_loader, now_utc, time_zon
                 if match["at_index"] is not None:
                     _stop_delays[trip_id] = (match["at_index"], match["delay"], now)
             elif remembered:
-                match = remembered[0]
+                match = dict(remembered[0])
+                if vehicles:
+                    # The feed still carries this trip, so nothing has reported the vehicle past
+                    # its stops: keep the row alive, with the delay last measured.
+                    if still_reporting:
+                        match = {**match, "timestamp": still_reporting}
+                    if match["at_index"] is not None:
+                        # It was last seen standing at a stop and is not there now, so it is on
+                        # its way to the next one, carrying the delay it had when it left.
+                        match = {**match, "k": min(match["at_index"] + 1, len(trip["stops"]) - 1), "at_index": None}
+                    _last_matches[trip_id] = (match, now)
             else:
                 continue
             # Back near the first stop after being underway is GPS noise, not a new start.
