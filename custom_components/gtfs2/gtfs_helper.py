@@ -29,6 +29,7 @@ from .const import (
     CONF_ACCEPT_HEADER_PB,
     DEFAULT_LOCAL_STOP_TIMERANGE,
     DEFAULT_LOCAL_STOP_TIMERANGE_HISTORY,
+    MAX_REALTIME_DEVIATION,
     DEFAULT_LOCAL_STOP_RADIUS,
     DEFAULT_PATH_RT,
     DEFAULT_PATH,
@@ -1137,6 +1138,19 @@ def _build_local_stop_element(self, row, base_date, date_label,
             departure_rt_datetime = departure_rt
             vehicles = svc.get("vehicles", []) if svc else []
             vehicle_rt = vehicles[0] if vehicles else None
+        # The same trip_id runs again on a later service day, and this stop's departures are listed
+        # for today and for tomorrow. A vehicle out now says nothing about tomorrow's run, so a
+        # realtime departure a service day away from this one is not about it.
+        if departure_rt != "-" and abs(
+            (departure_rt - self._departure_datetime).total_seconds()
+        ) > MAX_REALTIME_DEVIATION:
+            _LOGGER.debug(
+                "Realtime %s is not about the departure scheduled %s, ignoring it",
+                departure_rt, self._departure_datetime,
+            )
+            departure_rt = departure_rt_datetime = "-"
+            delay_rt = "-"
+            vehicle_rt = None
         _LOGGER.debug("Departure rt: %s, Delay rt: %s", departure_rt, delay_rt)
 
     if departure_rt != "-":
@@ -1479,7 +1493,16 @@ def get_local_stops_next_departures(self):
                     timetable.append(element)
                 _LOGGER.debug("Timetable: %s", timetable)
 
-        if (row["tomorrow"] == 1 and datetime.datetime.strptime(now_time_hist_corrected,"%H:%M") > datetime.datetime.strptime(row["departure_time"],"%H:%M:%S")):
+        # Tomorrow's copy of a departure belongs in the list only if it falls inside the same window
+        # the rows were selected for. Without this a departure that has just gone reappears at the
+        # bottom of the list as tomorrow's, a day out, while the night buses in between are missing.
+        tomorrow_departure = datetime.datetime.strptime(
+            f"{tomorrow_date} {row['departure_time']}", "%Y-%m-%d %H:%M:%S"
+        )
+        within_timerange = tomorrow_departure <= now + datetime.timedelta(
+            minutes=int(self._data.get("timerange", DEFAULT_LOCAL_STOP_TIMERANGE))
+        )
+        if (row["tomorrow"] == 1 and within_timerange and datetime.datetime.strptime(now_time_hist_corrected,"%H:%M") > datetime.datetime.strptime(row["departure_time"],"%H:%M:%S")):
             _LOGGER.debug("Tomorrow: adding row for tomorrow_date: %s", tomorrow_date)
 
             element = _build_local_stop_element(

@@ -49,6 +49,7 @@ def fresh_memory():
     vp._started_trips.clear()
     vp._last_positions.clear()
     vp._stop_delays.clear()
+    vp._stops_due.clear()
     yield
 
 
@@ -265,6 +266,49 @@ def test_waiting_at_a_stop_past_its_time_counts_up():
     }
 
 
+def test_a_stop_just_past_its_time_is_held_to_the_end_of_the_minute():
+    # standing at the first stop (due 17:00) half a minute later: both delays round down to zero,
+    # which would put the departure in the past and drop the row from the sensor until the next
+    # minute made it +1. Nothing has reported the vehicle past the stop, so it is departing now.
+    now = at(17, 0, 30)
+    stop = first_update(derive([vehicle(16.0003, "U2Z1", now)], now))
+    assert stop["stop_id"] == "U1Z1"
+    assert stop["departure"] == {"time": int(at(17, 0, 59).timestamp()), "delay": 0}
+
+
+def test_a_held_stop_keeps_the_delay_it_was_measured_with():
+    # two and a half minutes late at the second stop (due 17:03): the delay stays as measured,
+    # rounded down, while the time moves to the next minute so the row survives
+    now = at(17, 5, 30)
+    stop = first_update(derive([vehicle(16.0101, "U3Z1", now)], now))
+    assert stop["stop_id"] == "U2Z1"
+    assert stop["departure"] == {"time": int(at(17, 5, 59).timestamp()), "delay": 120}
+
+
+def test_a_stop_that_went_due_stays_due_when_the_delay_grows():
+    # due now at the first stop (17:00) and still standing there
+    now = at(17, 0, 30)
+    assert first_update(derive([vehicle(16.0003, "U2Z1", now)], now))["departure"]["time"]         == int(at(17, 0, 59).timestamp())
+
+    # three minutes on, still not reported past the stop: the delay it has run up says how late it
+    # already is, not that it leaves later, so it is still departing now rather than in three minutes
+    later = at(17, 3, 20)
+    stop = first_update(derive([vehicle(16.0003, "U2Z1", later)], later))
+    assert stop["departure"] == {"time": int(at(17, 3, 59).timestamp()), "delay": 180}
+
+
+def test_being_overdue_at_one_stop_makes_the_later_ones_at_least_as_late():
+    # standing at the second stop (due 17:03) at 17:07, so four minutes late there
+    derive([vehicle(16.0101, "U3Z1", at(17, 7))], at(17, 7))
+
+    # a minute on, still reporting and still not at the third stop (due 17:06), so it is a minute
+    # late there - and the fourth stop (due 17:09) cannot be reached any earlier than that, so its
+    # delay grows with it instead of staying at what was last measured
+    moving = derive([vehicle(16.0101, "U3Z1", at(17, 7, 30))], at(17, 7, 40))
+    delays = {s["stop_id"]: s["departure"]["delay"] for s in moving[0]["trip_update"]["stop_time_update"]}
+    assert delays["U3Z1"] == 240 and delays["U4Z1"] == 240
+
+
 def test_passed_stops_are_not_reported():
     updates = derive([vehicle(16.025, "U4Z1", at(17, 7))], at(17, 7))
     assert [s["stop_id"] for s in updates[0]["trip_update"]["stop_time_update"]] == ["U4Z1"]
@@ -288,16 +332,17 @@ def test_trip_past_midnight_uses_previous_service_day():
 def test_vehicle_dropping_out_keeps_its_last_estimate_for_a_while():
     derive([vehicle(16.005, "U2Z1", at(17, 4, 30))], at(17, 4, 30))
 
-    # the position went stale but the feed still carries the trip, so nothing reported the vehicle
-    # past the stop: the row stays and keeps counting up, while its age shows the data is old
+    # the position went stale but the feed still carries the trip: the row stays, still departing
+    # now, and keeps the delay it was last measured with - silence says nothing about how late it
+    # has become - while its age shows the data is old
     stale = derive([vehicle(16.005, "U2Z1", at(17, 4, 30))], at(17, 8))
-    assert first_update(stale)["departure"] == {"time": int(at(17, 8).timestamp()), "delay": 300}
+    assert first_update(stale)["departure"] == {"time": int(at(17, 8, 59).timestamp()), "delay": 60}
     assert stale[0]["vehicle_position"]["current_stop"] == "U1Z1"
     assert stale[0]["vehicle_position"]["age"] == 210
 
     # the trip is gone from the feed too: the last estimate is kept briefly, then dropped
     feed_failed = derive(None, at(17, 9))
-    assert first_update(feed_failed)["departure"] == {"time": int(at(17, 9).timestamp()), "delay": 360}
+    assert first_update(feed_failed)["departure"] == {"time": int(at(17, 9, 59).timestamp()), "delay": 60}
     assert feed_failed[0]["vehicle_position"]["age"] == 270
 
     # five minutes after the feed last carried the trip, the estimate is forgotten

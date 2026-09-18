@@ -47,12 +47,17 @@ MOVED_DISTANCE = 50
 # Positions older than this many seconds are not compared to tell whether a vehicle moved.
 MOVEMENT_WINDOW = 900
 
+# A stop whose time has come while the vehicle had not reported past it stays 'due now' for this
+# many seconds, so a delay measured later cannot push it back into the future.
+DUE_NOW_WINDOW = 3600
+
 # Shared by all sensors, which Home Assistant refreshes in executor threads.
 _memory_lock = threading.Lock()
 _last_matches = {}
 _started_trips = {}
 _last_positions = {}
 _stop_delays = {}
+_stops_due = {}
 
 StopTime = namedtuple("StopTime", "stop_id sequence arrival departure lat lon name", defaults=(None,))
 
@@ -326,16 +331,44 @@ def _trip_update(trip_id, trip, match, now_utc, started, last_seen=None):
     age = max(0, now - int(last_seen or match["timestamp"]))
 
     stop_time_updates = []
+    # Lateness only ever carries forward: a vehicle still short of a stop it is already overdue at
+    # cannot reach the stops after it any earlier than that, whatever it was measured at before.
+    # This grows the delay between stops from the feed's own evidence, without assuming a pace.
+    running_delay = delay
     for index in range(first, len(stops)):
         stop = stops[index]
         if arrival_of(stop) is None:
             continue
         # Nothing has reported the vehicle past this stop, so it cannot have called there in the
-        # past: once the stop's time has passed, it is late by at least that much.
+        # past: once the stop's time has passed, it is late by at least that much. This only holds
+        # while the vehicle is reporting - silence is not evidence that it is still short of the
+        # stop, and trains report minutes apart, so a quiet one would look late while running to
+        # time. Quiet vehicles keep the delay they were last measured with, and their age says so.
         overdue = math.floor((now - (day_start + departure_of(stop))) / 60) * 60
-        stop_delay = max(delay, overdue)
+        if age <= MAX_POSITION_AGE:
+            running_delay = max(running_delay, overdue)
+        stop_delay = running_delay
         arrival = int(day_start + arrival_of(stop) + stop_delay)
         departure = int(day_start + departure_of(stop) + stop_delay)
+        # Once a stop's time has come with nothing reporting the vehicle past it, it is due now and
+        # stays due until it is. Two things would otherwise take it off the screen: a departure in
+        # the past is dropped by the sensor, so rounding down left the first minute after a stop's
+        # time looking like a departure that had already happened - the row vanished and came back
+        # a minute later as +1 - and a delay measured afterwards would push it back into a fresh
+        # countdown, when what it says is how late the vehicle already is. The delay is untouched.
+        due_key = (trip_id, stop.stop_id)
+        with _memory_lock:
+            due = due_key in _stops_due
+            if departure < now or due:
+                _stops_due[due_key] = now
+                due = True
+        if due:
+            # The end of the minute now is in, so a sensor reading this still has it as departing
+            # this minute - 'now' on a dashboard - rather than a minute out. Only in the last
+            # seconds of a minute does it move on to the next one.
+            minute_end = now - now % 60 + 59
+            departure = int(minute_end + 60 if minute_end - now < 5 else minute_end)
+            arrival = min(arrival, departure)
         stop_time_updates.append({
             "stop_id": stop.stop_id,
             "stop_sequence": stop.sequence,
@@ -375,6 +408,8 @@ def _forget_old(now):
             del _last_positions[key]
         for trip_id in [t for t, (_, _, seen) in _stop_delays.items() if now - seen > MOVEMENT_WINDOW]:
             del _stop_delays[trip_id]
+        for key in [k for k, seen in _stops_due.items() if now - seen > DUE_NOW_WINDOW]:
+            del _stops_due[key]
 
 
 def derive_trip_updates(vehicle_entities, wanted, trip_loader, now_utc, time_zone):

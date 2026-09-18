@@ -316,4 +316,8 @@ TIME_STR_FORMAT = "%H:%M"
 # from a given date, which have no validity period and stay in the feed for months.
 ALERT_DISRUPTION_EFFECTS = (1, 2, 3, 4, 9)
 
+# A realtime departure further than this many seconds from the scheduled one is about a
+# different run of the same trip_id (the next service day's), not this departure.
+MAX_REALTIME_DEVIATION = 3600
+
 
