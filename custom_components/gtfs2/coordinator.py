@@ -237,6 +237,10 @@ class GTFSLocalStopUpdateCoordinator(DataUpdateCoordinator):
             "gtfs_dir": DEFAULT_PATH,
             "name": data["name"],
             "file": data["file"],
+            # Where this datasource came from, so it can be re-extracted when the realtime feed
+            # turns out to be a different version of the source data.
+            "url": data.get("url"),
+            "extract_from": data.get("extract_from", "url"),
             "offset": options["offset"] if "offset" in options else 0,
             "timerange": options.get("timerange", DEFAULT_LOCAL_STOP_TIMERANGE),
             "radius": options.get("radius", DEFAULT_LOCAL_STOP_RADIUS),

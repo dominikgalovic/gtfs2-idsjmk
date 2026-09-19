@@ -40,6 +40,7 @@ from .const import (
     )
 from .gtfs_rt_helper import get_rt_route_trip_statuses, get_gtfs_rt, safe_file_part, get_gtfs_feed_entities, get_rt_alerts_by_line
 from .vp_delays import derive_trip_updates, has_trip_updates, trip_loader_for
+from .rt_sync import match_rate, should_resync
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -1242,6 +1243,38 @@ def _local_stop_trip_updates_from_vehicle_positions(self, rows, base_dates, time
     )
 
 
+def _check_feed_pairing(self, feed_entities):
+    """Share of the feed's vehicles that its trip ids place correctly, re-extracting when they do not.
+
+    A provider that renumbers trips on every export leaves the imported timetable resolving the
+    feed's ids to other lines, which empties every realtime field with nothing to say why. The
+    share is measured from the positions the feed already carries; a datasource that has looked
+    unpaired for several refreshes is re-extracted, the only thing that can pair it again.
+    """
+    rate, sampled = match_rate(feed_entities, trip_loader_for(self._data["schedule"]))
+    if rate is None:
+        _LOGGER.debug("Feed pairing not measurable, vehicles placeable: %s", sampled)
+        return None
+    _LOGGER.debug("Feed pairing for %s: %.0f%% of %s vehicles", self._data["file"], rate * 100, sampled)
+    if not should_resync(self._data["file"], rate, dt_util.utcnow().timestamp()):
+        return round(rate * 100)
+    _LOGGER.warning(
+        "Only %.0f%% of the realtime feed's vehicles fit the timetable in %s, so the two are not "
+        "the same version of the source data: re-extracting it, which takes a few minutes",
+        rate * 100, self._data["file"],
+    )
+    source = {
+        "file": self._data["file"],
+        "url": self._data.get("url"),
+        "extract_from": self._data.get("extract_from", "url"),
+    }
+    if not source["url"] and source["extract_from"] == "url":
+        _LOGGER.warning("No url stored for %s, cannot re-extract it", self._data["file"])
+        return round(rate * 100)
+    get_gtfs(self.hass, DEFAULT_PATH, source, True)
+    return round(rate * 100)
+
+
 def get_local_stops_next_departures(self):
     # 20260803 Note: this procedure is not using an option to in/exclude 'tomorrow'
     _LOGGER.debug("Get local stop departure with data: %s", self._data)
@@ -1437,6 +1470,7 @@ def get_local_stops_next_departures(self):
     # equivalent and avoids the redundant work.
     feed_entities = None
     alerts_by_line = {}
+    realtime_match = None
     if self._realtime:
 
         feed_entities = get_gtfs_feed_entities(
@@ -1447,6 +1481,7 @@ def get_local_stops_next_departures(self):
             get_gtfs_feed_entities(url=self._trip_update_url, headers=self._headers, label="alerts")
         )
         if not has_trip_updates(feed_entities):
+            realtime_match = _check_feed_pairing(self, feed_entities)
             feed_entities = _local_stop_trip_updates_from_vehicle_positions(
                 self, rows, (now_date, tomorrow_date), timezone_local
             ) or feed_entities
@@ -1524,6 +1559,7 @@ def get_local_stops_next_departures(self):
 
     for stop in local_stops_list:
         stop["departure"].sort(key=lambda d: d["departure_datetime"])
+        stop["realtime_match"] = realtime_match
         stop["alerts"] = []
         for line in sorted({departure["route"] for departure in stop["departure"]}):
             for alert in alerts_by_line.get(line, []):

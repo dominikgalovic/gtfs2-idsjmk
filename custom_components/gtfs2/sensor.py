@@ -570,6 +570,9 @@ class GTFSLocalStopSensor(CoordinatorEntity, SensorEntity):
                     self._attributes["latitude"] = stop["latitude"]
                     self._attributes["longitude"] = stop["longitude"]
                     self._attributes["alerts"] = stop.get("alerts", [])
+                    # How much of the realtime feed the imported timetable can place: near
+                    # zero means the two are different versions of the source data.
+                    self._attributes["realtime_match"] = stop.get("realtime_match")
                     
         self._attr_extra_state_attributes = self._attributes
         return self._attr_extra_state_attributes
